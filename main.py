@@ -50,70 +50,82 @@ async def verify_webhook(request: Request):
 async def receive_message(request: Request):
     data = await request.json()
     try:
-        entry = data["entry"]["changes"]["value"]
-        if "messages" in entry:
-            message = entry["messages"]
-            sender = message["from"]
-            msg_type = message["type"]
+        # CORRECCIÓN DE LISTA: Meta envía 'entry' y 'changes' como listas ([0])
+        if "entry" in data and data["entry"]:
+            entry = data["entry"][0]
+            if "changes" in entry and entry["changes"]:
+                changes_value = entry["changes"][0]["value"]
+                
+                if "messages" in changes_value and changes_value["messages"]:
+                    message = changes_value["messages"][0] # Los mensajes también vienen en lista
+                    sender = message["from"]  # Ej. 5218112345678
+                    msg_type = message["type"]
 
-            res = supabase.table("empleados").select("*, empresas(*)").eq("telefono", sender).eq("activo", True).execute()
-            
-            if not res.data:
-                await enviar_texto(sender, f"⛔ Tu número ({sender}) no está registrado en ninguna empresa activa. Contacta a tu administrador.")
-                return {"status": "ok"}
+                    # 1. Buscar empleado y configuración de su empresa en Supabase
+                    res = supabase.table("empleados").select("*, empresas(*)").eq("telefono", sender).eq("activo", True).execute()
+                    
+                    if not res.data:
+                        # Si no se encuentra, imprimimos en consola el número exacto que detecta Meta para ayudarte a revisar
+                        print(f"[RECHAZADO] Número detectado por Meta no registrado en Supabase: {sender}")
+                        await enviar_texto(sender, f"⛔ Tu número ({sender}) no está registrado en ninguna empresa activa. Contacta a tu administrador.")
+                        return {"status": "ok"}
 
-            empleado = res.data
-            empresa = empleado["empresas"]
+                    # Supabase devuelve una lista, tomamos el primer registro encontrado
+                    empleado = res.data[0]
+                    empresa = empleado["empresas"]
 
-            if not empresa["activa"]:
-                await enviar_texto(sender, "⚠️ El servicio de tu empresa está suspendido temporalmente.")
-                return {"status": "ok"}
+                    if not empresa["activa"]:
+                        await enviar_texto(sender, "⚠️ El servicio de tu empresa está suspendido temporalmente.")
+                        return {"status": "ok"}
 
-            if msg_type == "text":
-                await enviar_menu_inteligente(sender, empleado, empresa)
+                    # 2. Si envía texto -> Mostrar menú inteligente según su estado actual
+                    if msg_type == "text":
+                        await enviar_menu_inteligente(sender, empleado, empresa)
 
-            elif msg_type == "interactive":
-                interactive = message["interactive"]
-                accion_id = interactive.get("button_reply", {}).get("id") or interactive.get("list_reply", {}).get("id")
-                accion_titulo = interactive.get("button_reply", {}).get("title") or interactive.get("list_reply", {}).get("title")
+                    # 3. Si elige una opción del menú interactivo
+                    elif msg_type == "interactive":
+                        interactive = message["interactive"]
+                        accion_id = interactive.get("button_reply", {}).get("id") or interactive.get("list_reply", {}).get("id")
+                        accion_titulo = interactive.get("button_reply", {}).get("title") or interactive.get("list_reply", {}).get("title")
 
-                if not es_movimiento_valido(empleado["estado_actual"], accion_id):
-                    await enviar_texto(sender, "⚠️ Movimiento no válido para tu estado actual. Usa el menú actualizado:")
-                    await enviar_menu_inteligente(sender, empleado, empresa)
-                    return {"status": "ok"}
-
-                if empresa["pedir_ubicacion"]:
-                    esperando_gps[sender] = {"accion_id": accion_id, "titulo": accion_titulo}
-                    await enviar_texto(sender, f"Seleccionaste: *{accion_titulo}*.\n\n📍 Envía tu *ubicación actual* (clip 📎 -> Ubicación) para guardar el registro.")
-                else:
-                    await registrar_en_db(sender, empleado, empresa, accion_id, accion_titulo)
-
-            elif msg_type == "location":
-                if sender in esperando_gps:
-                    datos = esperando_gps.pop(sender)
-                    lat = message["location"]["latitude"]
-                    lon = message["location"]["longitude"]
-
-                    if empresa.get("validar_geocerca"):
-                        distancia = calcular_distancia_metros(
-                            lat, lon,
-                            empresa["latitud_sucursal"],
-                            empresa["longitud_sucursal"]
-                        )
-                        radio = empresa.get("radio_metros", 100)
-                        if distancia > radio:
-                            await enviar_texto(
-                                sender,
-                                f"❌ *Registro rechazado por ubicación*\n"
-                                f"Te encuentras a *{int(distancia)} metros* de la sucursal (máximo permitido: {radio}m).\n"
-                                f"Acércate a tu lugar de trabajo e intenta de nuevo."
-                            )
+                        if not es_movimiento_valido(empleado["estado_actual"], accion_id):
+                            await enviar_texto(sender, "⚠️ Movimiento no válido para tu estado actual. Usa el menú actualizado:")
+                            await enviar_menu_inteligente(sender, empleado, empresa)
                             return {"status": "ok"}
 
-                    await registrar_en_db(sender, empleado, empresa, datos["accion_id"], datos["titulo"], lat, lon)
-                else:
-                    await enviar_texto(sender, "⚠️ Primero selecciona una opción del menú:")
-                    await enviar_menu_inteligente(sender, empleado, empresa)
+                        if empresa["pedir_ubicacion"]:
+                            esperando_gps[sender] = {"accion_id": accion_id, "titulo": accion_titulo}
+                            await enviar_texto(sender, f"Seleccionaste: *{accion_titulo}*.\n\n📍 Envía tu *ubicación actual* (clip 📎 -> Ubicación) para guardar el registro.")
+                        else:
+                            await registrar_en_db(sender, empleado, empresa, accion_id, accion_titulo)
+
+                    # 4. Si envía ubicación GPS
+                    elif msg_type == "location":
+                        if sender in esperando_gps:
+                            datos = esperando_gps.pop(sender)
+                            lat = message["location"]["latitude"]
+                            lon = message["location"]["longitude"]
+
+                            if empresa.get("validar_geocerca"):
+                                distancia = calcular_distancia_metros(
+                                    lat, lon,
+                                    empresa["latitud_sucursal"],
+                                    empresa["longitud_sucursal"]
+                                )
+                                radio = empresa.get("radio_metros", 100)
+                                if distancia > radio:
+                                    await enviar_texto(
+                                        sender,
+                                        f"❌ *Registro rechazado por ubicación*\n"
+                                        f"Te encuentras a *{int(distancia)} metros* de la sucursal (máximo permitido: {radio}m).\n"
+                                        f"Acércate a tu lugar de trabajo e intenta de nuevo."
+                                    )
+                                    return {"status": "ok"}
+
+                            await registrar_en_db(sender, empleado, empresa, datos["accion_id"], datos["titulo"], lat, lon)
+                        else:
+                            await enviar_texto(sender, "⚠️ Primero selecciona una opción del menú:")
+                            await enviar_menu_inteligente(sender, empleado, empresa)
 
     except Exception as e:
         print(f"Error procesando webhook: {e}")

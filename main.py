@@ -39,33 +39,26 @@ def calcular_distancia_metros(lat1: float, lon1: float, lat2: float, lon2: float
 async def health_check():
     return {"status": "ChecaBot RH activo y operando"}
 
-@app.get("/webhook")
-async def verify_webhook(request: Request):
-    params = request.query_params
-    if params.get("hub.mode") == "subscribe" and params.get("hub.verify_token") == VERIFY_TOKEN:
-        return Response(content=params.get("hub.challenge"), media_type="text/plain")
-    return Response(content="Error de verificación", status_code=403)
-
 @app.post("/webhook")
 async def receive_message(request: Request):
     data = await request.json()
     try:
-        # CORRECCIÓN DE LISTA: Meta envía 'entry' y 'changes' como listas ([0])
+        # Extraer de forma segura el cuerpo del mensaje respetando las listas de Meta
         if "entry" in data and data["entry"]:
             entry = data["entry"][0]
             if "changes" in entry and entry["changes"]:
-                changes_value = entry["changes"][0]["value"]
+                change = entry["changes"][0]
+                changes_value = change.get("value", {})
                 
                 if "messages" in changes_value and changes_value["messages"]:
-                    message = changes_value["messages"][0] # Los mensajes también vienen en lista
-                    sender = message["from"]  # Ej. 5218112345678
+                    message = changes_value["messages"][0]
+                    sender = message["from"]  # Número del empleado (Ej. 5218112345678)
                     msg_type = message["type"]
 
                     # 1. Buscar empleado y configuración de su empresa en Supabase
                     res = supabase.table("empleados").select("*, empresas(*)").eq("telefono", sender).eq("activo", True).execute()
                     
                     if not res.data:
-                        # Si no se encuentra, imprimimos en consola el número exacto que detecta Meta para ayudarte a revisar
                         print(f"[RECHAZADO] Número detectado por Meta no registrado en Supabase: {sender}")
                         await enviar_texto(sender, f"⛔ Tu número ({sender}) no está registrado en ninguna empresa activa. Contacta a tu administrador.")
                         return {"status": "ok"}

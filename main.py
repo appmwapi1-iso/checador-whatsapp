@@ -43,19 +43,23 @@ async def health_check():
 async def receive_message(request: Request):
     data = await request.json()
     try:
-        # Extraer de forma segura el cuerpo del mensaje respetando las listas de Meta
+        # 1. Extraer el mensaje respetando estrictamente la estructura de listas de Meta
         if "entry" in data and data["entry"]:
-            entry = data["entry"][0]
+            entry = data["entry"][0]  # Accedemos al primer elemento de la lista
             if "changes" in entry and entry["changes"]:
                 change = entry["changes"][0]
                 changes_value = change.get("value", {})
                 
                 if "messages" in changes_value and changes_value["messages"]:
-                    message = changes_value["messages"][0]
-                    sender = message["from"]  # Número del empleado (Ej. 5218112345678)
-                    msg_type = message["type"]
+                    message_obj = changes_value["messages"][0] # Accedemos al primer mensaje de la lista
+                    sender = message_obj.get("from")  # Número del empleado (Ej. 5218112345678)
+                    msg_type = message_obj.get("type")
 
-                    # 1. Buscar empleado y configuración de su empresa en Supabase
+                    if not sender:
+                        print("No se encontró el remitente ('from') en el objeto de mensaje.")
+                        return {"status": "ok"}
+
+                    # 2. Buscar empleado y configuración de su empresa en Supabase
                     res = supabase.table("empleados").select("*, empresas(*)").eq("telefono", sender).eq("activo", True).execute()
                     
                     if not res.data:
@@ -71,13 +75,13 @@ async def receive_message(request: Request):
                         await enviar_texto(sender, "⚠️ El servicio de tu empresa está suspendido temporalmente.")
                         return {"status": "ok"}
 
-                    # 2. Si envía texto -> Mostrar menú inteligente según su estado actual
+                    # 3. Si envía texto -> Mostrar menú inteligente según su estado actual
                     if msg_type == "text":
                         await enviar_menu_inteligente(sender, empleado, empresa)
 
-                    # 3. Si elige una opción del menú interactivo
+                    # 4. Si elige una opción del menú interactivo
                     elif msg_type == "interactive":
-                        interactive = message["interactive"]
+                        interactive = message_obj["interactive"]
                         accion_id = interactive.get("button_reply", {}).get("id") or interactive.get("list_reply", {}).get("id")
                         accion_titulo = interactive.get("button_reply", {}).get("title") or interactive.get("list_reply", {}).get("title")
 
@@ -92,12 +96,12 @@ async def receive_message(request: Request):
                         else:
                             await registrar_en_db(sender, empleado, empresa, accion_id, accion_titulo)
 
-                    # 4. Si envía ubicación GPS
+                    # 5. Si envía ubicación GPS
                     elif msg_type == "location":
                         if sender in esperando_gps:
                             datos = esperando_gps.pop(sender)
-                            lat = message["location"]["latitude"]
-                            lon = message["location"]["longitude"]
+                            lat = message_obj["location"]["latitude"]
+                            lon = message_obj["location"]["longitude"]
 
                             if empresa.get("validar_geocerca"):
                                 distancia = calcular_distancia_metros(

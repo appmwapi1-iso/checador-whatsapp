@@ -214,3 +214,5 @@ async def post_whatsapp(payload: dict):
     url = f"https://facebook.com{PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
     async with httpx.AsyncClient() as client:
+         resp = await client.post(url, json=payload, headers=headers)
+         print(f"[RESPUESTA META API] Status: {resp.status_code} | Body: {resp.text}")

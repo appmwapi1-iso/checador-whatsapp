@@ -7,7 +7,6 @@ from supabase import create_client, Client
 
 app = FastAPI()
 
-# Variables de entorno
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "mi_token_secreto_123")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
@@ -39,54 +38,57 @@ def calcular_distancia_metros(lat1: float, lon1: float, lat2: float, lon2: float
 async def health_check():
     return {"status": "ChecaBot RH activo y operando"}
 
+@app.get("/webhook")
+async def verify_webhook(request: Request):
+    params = request.query_params
+    if params.get("hub.mode") == "subscribe" and params.get("hub.verify_token") == VERIFY_TOKEN:
+        return Response(content=params.get("hub.challenge"), media_type="text/plain")
+    return Response(content="Error de verificación", status_code=403)
+
 @app.post("/webhook")
 async def receive_message(request: Request):
     data = await request.json()
     try:
-        # 1. Extraer el mensaje respetando estrictamente la estructura de listas de Meta
-        if "entry" in data and data["entry"]:
-            entry = data["entry"][0]  # Accedemos al primer elemento de la lista
-            if "changes" in entry and entry["changes"]:
-                change = entry["changes"][0]
-                changes_value = change.get("value", {})
+        # 1. Extraer el mensaje usando el índice [0] obligatorio para las listas de Meta
+        if "entry" in data and len(data["entry"]) > 0:
+            entry = data["entry"][0]
+            if "changes" in entry and len(entry["changes"]) > 0:
+                changes_value = entry["changes"][0].get("value", {})
                 
-                if "messages" in changes_value and changes_value["messages"]:
-                    message_obj = changes_value["messages"][0] # Accedemos al primer mensaje de la lista
-                    sender = message_obj.get("from")  # Número del empleado (Ej. 5218112345678)
-                    msg_type = message_obj.get("type")
+                if "messages" in changes_value and len(changes_value["messages"]) > 0:
+                    message = changes_value["messages"][0]
+                    sender = message.get("from")
+                    msg_type = message.get("type")
 
-                    if not sender:
-                        print("No se encontró el remitente ('from') en el objeto de mensaje.")
-                        return {"status": "ok"}
+                    print(f"[MENSAJE RECIBIDO] De: {sender} | Tipo: {msg_type}")
 
-                    # 2. Buscar empleado y configuración de su empresa en Supabase
+                    # 2. Buscar empleado en Supabase (res.data es una lista, usamos)
                     res = supabase.table("empleados").select("*, empresas(*)").eq("telefono", sender).eq("activo", True).execute()
                     
-                    if not res.data:
-                        print(f"[RECHAZADO] Número detectado por Meta no registrado en Supabase: {sender}")
-                        await enviar_texto(sender, f"⛔ Tu número ({sender}) no está registrado en ninguna empresa activa. Contacta a tu administrador.")
+                    if not res.data or len(res.data) == 0:
+                        print(f"[RECHAZADO] Número {sender} no encontrado en tabla empleados.")
+                        await enviar_texto(sender, f"⛔ Tu número ({sender}) no está registrado en ninguna empresa activa.")
                         return {"status": "ok"}
 
-                    # Supabase devuelve una lista, tomamos el primer registro encontrado
                     empleado = res.data[0]
                     empresa = empleado["empresas"]
 
                     if not empresa["activa"]:
-                        await enviar_texto(sender, "⚠️ El servicio de tu empresa está suspendido temporalmente.")
+                        await enviar_texto(sender, "⚠️ El servicio de tu empresa está suspendido.")
                         return {"status": "ok"}
 
-                    # 3. Si envía texto -> Mostrar menú inteligente según su estado actual
+                    # 3. Enviar botonera al recibir texto
                     if msg_type == "text":
                         await enviar_menu_inteligente(sender, empleado, empresa)
 
-                    # 4. Si elige una opción del menú interactivo
+                    # 4. Procesar botón o lista elegida
                     elif msg_type == "interactive":
-                        interactive = message_obj["interactive"]
+                        interactive = message["interactive"]
                         accion_id = interactive.get("button_reply", {}).get("id") or interactive.get("list_reply", {}).get("id")
                         accion_titulo = interactive.get("button_reply", {}).get("title") or interactive.get("list_reply", {}).get("title")
 
                         if not es_movimiento_valido(empleado["estado_actual"], accion_id):
-                            await enviar_texto(sender, "⚠️ Movimiento no válido para tu estado actual. Usa el menú actualizado:")
+                            await enviar_texto(sender, "⚠️ Movimiento no válido para tu estado actual. Usa el menú:")
                             await enviar_menu_inteligente(sender, empleado, empresa)
                             return {"status": "ok"}
 
@@ -96,12 +98,12 @@ async def receive_message(request: Request):
                         else:
                             await registrar_en_db(sender, empleado, empresa, accion_id, accion_titulo)
 
-                    # 5. Si envía ubicación GPS
+                    # 5. Procesar ubicación GPS
                     elif msg_type == "location":
                         if sender in esperando_gps:
                             datos = esperando_gps.pop(sender)
-                            lat = message_obj["location"]["latitude"]
-                            lon = message_obj["location"]["longitude"]
+                            lat = message["location"]["latitude"]
+                            lon = message["location"]["longitude"]
 
                             if empresa.get("validar_geocerca"):
                                 distancia = calcular_distancia_metros(
@@ -114,8 +116,7 @@ async def receive_message(request: Request):
                                     await enviar_texto(
                                         sender,
                                         f"❌ *Registro rechazado por ubicación*\n"
-                                        f"Te encuentras a *{int(distancia)} metros* de la sucursal (máximo permitido: {radio}m).\n"
-                                        f"Acércate a tu lugar de trabajo e intenta de nuevo."
+                                        f"Estás a *{int(distancia)}m* de la sucursal (máximo: {radio}m)."
                                     )
                                     return {"status": "ok"}
 
@@ -125,7 +126,7 @@ async def receive_message(request: Request):
                             await enviar_menu_inteligente(sender, empleado, empresa)
 
     except Exception as e:
-        print(f"Error procesando webhook: {e}")
+        print(f"[ERROR CRÍTICO] {e}")
 
     return {"status": "ok"}
 
@@ -213,4 +214,3 @@ async def post_whatsapp(payload: dict):
     url = f"https://facebook.com{PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
     async with httpx.AsyncClient() as client:
-        await client.post(url, json=payload, headers=headers)

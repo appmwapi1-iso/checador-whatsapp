@@ -211,8 +211,13 @@ async def enviar_texto(to: str, text: str):
     await post_whatsapp({"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": text}})
 
 async def post_whatsapp(payload: dict):
+    # Corrección automática para México: Meta exige 52 + 10 dígitos al enviar
+    if payload.get("to", "").startswith("521") and len(payload["to"]) == 13:
+        payload["to"] = "52" + payload["to"][3:]
+
     url = f"https://facebook.com{PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
     async with httpx.AsyncClient() as client:
-         resp = await client.post(url, json=payload, headers=headers)
-         print(f"[RESPUESTA META API] Status: {resp.status_code} | Body: {resp.text}")
+        resp = await client.post(url, json=payload, headers=headers)
+        print(f"[RESPUESTA META API] Status: {resp.status_code} | Body: {resp.text}")
+
